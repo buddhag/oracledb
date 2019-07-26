@@ -1,0 +1,950 @@
+--DBA Notes---
+
+++++++++++++++++++++++++++++++++++
+PERFORMANCE
++++++++++++++++++++++++++++
+
+--Blocking Sessions
+
+
+--#1 - find blocking sessions with v$session
+SELECT
+   s.blocking_session, 
+   s.sid, 
+   s.serial#, 
+   s.seconds_in_wait
+FROM
+   v$session s
+WHERE
+   blocking_session IS NOT NULL;
+   
+--#2 - find blocking sessions using v$lock   
+SELECT 
+   l1.sid || ' is blocking ' || l2.sid blocking_sessions
+FROM 
+   v$lock l1, v$lock l2
+WHERE
+   l1.block = 1 AND
+   l2.request > 0 AND
+   l1.id1 = l2.id1 AND
+   l1.id2 = l2.id2
+   
+514 is blocking 597
+848 is blocking 21   
+--#3 - blocking sessions with all available information
+SELECT s1.username || '@' || s1.machine
+    || ' ( SID=' || s1.sid || ' )  is blocking '
+    || s2.username || '@' || s2.machine || ' ( SID=' || s2.sid || ' ) ' AS blocking_status
+    FROM v$lock l1, v$session s1, v$lock l2, v$session s2
+    WHERE s1.sid=l1.sid AND s2.sid=l2.sid
+    AND l1.BLOCK=1 AND l2.request > 0
+    AND l1.id1 = l2.id1
+    AND l1.id2 = l2.id2;
+    
+SEBU@ptlxbp01 ( SID=514 )  is blocking SEBU@ptlxbp01 ( SID=597 ) 
+SEBU@ptlxbp02 ( SID=848 )  is blocking SEBU@ptlxbp02 ( SID=21 ) 
+
+--#4 - identifying blocked objects
+SELECT sid, id1 FROM v$lock WHERE TYPE='TM'
+
+SELECT * FROM v$lock WHERE TYPE='TM'
+
+--The ID you get from this query refers to the actual database object which can help you to identify the problem, look at the next query:
+SELECT object_name FROM dba_objects WHERE object_id in (135156,135160,115914,116393, 20127)
+
+select sid,id1, object_name from v$lock, dba_objects where v$lock.id1=Dba_Objects.Object_Id and v$lock.type='TM'
+
+$topas
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Name           PID  CPU%  PgSp Owner            PageIn        0  PAGING SPACE
+oracle     16253238  2.3  214M oracle           PageOut       0  Size,MB   20480
+ksh        37683724  1.1  448K oracle           Sios          0  % Used      1
+reaffin      459030  0.4  640K root                              % Free     99
+topas      27984312  0.3 7.62M oracle           NFS (calls/sec)
+oracle     15728976  0.2 20.1M oracle           SerV2         0  WPAR Activ    0
+init              1  0.2  768K root             CliV2         0  WPAR Total    0
+oracle      6554266  0.1 14.0M oracle           SerV3         0  Press: "h"-help
+oracle     36176160  0.1 14.0M oracle           CliV3         0         "q"-quit
+oracle     10158374  0.1 16.5M oracle           SerV4         0
+oracle     11469116  0.0 14.0M oracle           CliV4         0
+oracle     11862462  0.0 20.5M oracle
+oracle     10355094  0.0 15.8M oracle
+sqlplus    35127744  0.0 9.45M oracle
+oracle     22086136  0.0 15.2M oracle
+oracle      7143868  0.0 15.3M oracle
+lock_rcv    3342802  0.0  448K root
+oracle     23003602  0.0 14.6M oracle
+oracle     27197944  0.0 14.0M oracle
+oracle     30736758  0.0 19.8M oracle
+oracle      6357610  0.0 14.1M oracle
+
+
+
+-- FIND SQL BEING EXECUTED BY A OS PROCESS ID (PID)
+prompt "Please Enter The UNIX Process ID"
+set pagesize 50000
+set linesize 30000
+set long 500000
+set head off
+select
+s.username su,
+substr(sa.sql_text,1,540) txt
+from v$process p,
+v$session s,
+v$sqlarea sa
+where p.addr=s.paddr
+and s.username is not null
+and s.sql_address=sa.address(+)
+and s.sql_hash_value=sa.hash_value(+)
+and spid=&SPID;
+
+--1.
+SELECT *
+FROM   v$sql
+WHERE  sql_text LIKE '%SELECT NSB.ID, NSB.BATCH_NUMBER, NPT.NAME, NPT.ID PTP_ID%'
+AND    sql_text NOT LIKE '%dba_sql_plan_baselines%'
+AND    sql_text NOT LIKE '%EXPLAIN%';
+
+--2.
+SELECT   SQL_ID, CHILD_NUMBER AS "Child Num",
+         PLAN_HASH_VALUE AS "Plan Hash",
+         OPTIMIZER_ENV_HASH_VALUE AS "Opt Env Hash"
+FROM     V$SQL
+WHERE    sql_id ='1nvwzzjww5sr4'
+
+--3. Display the execution plan for the cursor:
+SELECT * FROM table(DBMS_XPLAN.DISPLAY_CURSOR('1nvwzzjww5sr4',0));
+
+--4. -- Show the Bind Variable for a Given SQLID.
+
+
+SELECT 
+  sql_id,
+  t.sql_text sql_text,  
+  b.name bind_name,
+  b.value_string bind_value 
+FROM
+  v$sql t 
+JOIN
+  v$sql_bind_capture b  using (sql_id)
+WHERE
+  b.value_string is not null  
+AND
+  sql_id='&sqlid'
+/
+--
+-- Display Archive Log Generation by Day
+--
+ 
+SET PAUSE ON
+SET PAUSE 'Press Return to Continue'
+SET PAGESIZE 60
+SET LINESIZE 300
+SET VERIFY OFF
+ 
+COL "Generation Date" FORMAT a20
+ 
+SELECT TRUNC(completion_time)  "Generation Date" ,
+   round(SUM(blocks*block_size)/1048576,0) "Total for the Day in MB"
+FROM gv$archived_log
+GROUP BY TRUNC(completion_time)
+ORDER BY TRUNC(completion_time)
+/
+
+----Gather Statistics
+
+--GLOBAL Preferences
+SELECT 
+  DBMS_STATS.get_prefs(pname=>'INCREMENTAL') incremental,
+  DBMS_STATS.get_prefs(pname=>'GRANULARITY') granularity,
+  DBMS_STATS.get_prefs(pname=>'STALE_PERCENT') publish,
+  DBMS_STATS.get_prefs(pname=>'ESTIMATE_PERCENT') estimate_percent,
+  DBMS_STATS.get_prefs(pname=>'CASCADE') cascade,
+  DBMS_STATS.get_prefs(pname=>'METHOD_OPT') method_opt,
+  DBMS_STATS.get_prefs(pname=>'DEGREE') DEGREE,
+  DBMS_STATS.get_prefs(pname=>'CONCURRENT') CONCURRENT,
+  DBMS_STATS.get_prefs(pname=>'INCREMENTAL_STALENESS') INCREMENTAL_STALENESS,
+  DBMS_STATS.GET_PREFS(pname=>'APPROXIMATE_NDV_ALGORITHM') NDV_ALGORITHM
+FROM dual;
+
+--Table Preferences
+select * from dba_tab_stat_prefs where owner not in ('SYSTEM','SYS')
+
+--get optimizer parameters 
+select * from v$parameter where name like 'optimizer%'
+
+--histogram stats
+select * from DBA_tab_histograms where owner in ('NEM')
+
+
+
+select * from DBA_TAB_PENDING_STATS
+SELECT * FROM DBA_COL_PENDING_STATS
+SELECT * FROM DBA_IND_PENDING_STATS
+SELECT * FROM DBA_TAB_HISTGRM_PENDING_STATS
+
+select operation||decode(target,null,null,'-'||target) operation
+      ,to_char(start_time,'DD-MON-YYYY HH24:MI:SS.FF4') start_time
+      ,to_char(end_time,'DD-MON-YYYY HH24:MI:SS.FF4') end_time
+from dba_optstat_operations
+WHERE TRUNC(START_TIME) ='28-feb-2019'
+order by start_time desc
+/
+
+--From Oracle 12c 
+
+--REPORT_STATS_OPERATIONS 
+--Reporting Statistics Gathering Of Objects During Automatic Job In 12c (Doc ID 2104236.1)
+--new feature available in 12C which can track the objects that are gathered with the statistics during the automatic statistics collection job running through the maintenance window.
+
+--REPORT_STATS_OPERATIONS: This function generates a report of all statistics operations that take place between two timestamps which may or may not have been provided.
+
+
+--Following command can be used to get the report:-
+
+SET LINES 200 PAGES 0
+SET LONG 100000
+COLUMN REPORT FORMAT A200
+
+VARIABLE my_report CLOB;
+BEGIN
+:my_report := DBMS_STATS.REPORT_STATS_OPERATIONS (
+since => SYSDATE-1/2
+, until => SYSDATE
+, detail_level => 'TYPICAL'
+, format => 'HTML'
+, auto_only => TRUE
+);
+END;
+/
+
+SQL> spool output.html
+SQL> print my_report;
+SQL> spool off;
+
+
+--REPORT_SINGLE_STATS_OPERATION
+SET LINES 200 PAGES 0 
+COLUMN REPORT FORMAT A200 
+set long 999999999 
+set longchunksize 999999999 
+VARIABLE my_report CLOB; 
+BEGIN 
+:my_report :=DBMS_STATS.REPORT_SINGLE_STATS_OPERATION ( 
+   OPID    => 3011473, 
+FORMAT  => 'HTML' 
+); 
+END; 
+/ 
+spool output1.html 
+print my_report; 
+SQL> spool off; 
+
+---------------------------------EMC Gather stats fix
+
+spool hyperloglog.log
+
+set echo on
+set feedback on
+
+select DBMS_STATS.GET_GLOBAL_PREFS('APPROXIMATE_NDV_ALGORITHM') FROM DUAL; , 'HYPERLOGLOG');
+
+EXEC DBMS_STATS.DELETE_DATABASE_PREFS('STAT_CATEGORY');
+EXEC DBMS_STATS.SET_GLOBAL_PREFS('APPROXIMATE_NDV_ALGORITHM', 'HYPERLOGLOG');
+EXEC DBMS_STATS.SET_GLOBAL_PREFS('INCREMENTAL_STALENESS','NULL');
+EXEC DBMS_STATS.SET_DATABASE_PREFS('APPROXIMATE_NDV_ALGORITHM', 'HYPERLOGLOG');
+EXEC DBMS_STATS.SET_DATABASE_PREFS('INCREMENTAL_STALENESS', 'NULL');
+EXEC DBMS_STATS.delete_database_stats;
+EXEC DBMS_STATS.gather_database_stats;
+
+spool off
+
+---------------------------------SQLT XTRACT for poor performing query: 
+
+>>Download SQLT tool from here SQLT Diagnostic Tool ( Doc ID 215187.1 ) 
+>>Install SQLT as per SQLT Usage Instructions ( Doc ID 1614107.1 ) 
+>>Identify your SQL ID as per doc How to Determine the SQL_ID for a SQL Statement ( Doc ID 1627387.1 ) <<<<<<<<<<<< identify your query as per document 
+>>Execute sqlt XTRACT method for your SQL_ID 
+
+# cd sqlt/run 
+# sqlplus apps 
+SQL> START sqltxtract.sql <your_sql_id> sqltxplain_password 
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+--session_longops
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+select to_char(sysdate,'DD-MON HH24:MI:SS') Collection_DateStamp, sid, opname, target, sofar, totalwork,
+  units, to_char(start_time,'HH24:MI:SS') StartTime,
+  time_remaining, message, username
+  from v$session_longops
+where 1=1
+order by start_time
+
+-- Description          : list the sid details for long running session like when it started when last update how much time still left.
+
+
+set lines 200
+col OPNAME for a25
+
+Select
+a.sid,
+a.serial#,
+b.status,
+a.opname,
+to_char(a.START_TIME,' dd-Mon-YYYY HH24:mi:ss') START_TIME,
+to_char(a.LAST_UPDATE_TIME,' dd-Mon-YYYY HH24:mi:ss') LAST_UPDATE_TIME,
+a.time_remaining as "Time Remaining Sec" ,
+a.time_remaining/60 as "Time Remaining Min",
+a.time_remaining/60/60 as "Time Remaining HR"
+From v$session_longops a, v$session b
+where a.sid = b.sid
+and a.sid =&sid
+And time_remaining > 0;
+
+
+--
+select to_char(sysdate,'DD-MON HH24:MI:SS') Collection_DateStamp, sid, opname, target, sofar, totalwork,
+  units, to_char(start_time,'HH24:MI:SS') StartTime,
+  time_remaining, message, username
+  from v$session_longops
+  where 1=1
+ order by start_time
+/
+
+select sid, opname, target, sofar, totalwork,
+units, to_char(start_time,'HH24:MI:SS') StartTime,
+time_remaining, message, username
+from v$session_longops
+where sofar != totalwork
+order by start_time
+/ 
+
+
+alter session set nls_date_format = 'DD-MM-YYYY HH24:MI:SS';
+
+SELECT
+    l.inst_id,
+    l.sid,
+    l.serial#,
+    l.sql_id,
+    l.opname,
+    l.username,
+    l.target,
+    l.sofar,
+    l.totalwork,
+    l.start_time,
+    l.last_update_time,
+    round(l.time_remaining / 60,2) "REMAIN MINS",
+    round(l.elapsed_seconds / 60,2) "ELAPSED MINS",
+    round( (l.time_remaining + l.elapsed_seconds) / 60,2) "TOTAL MINS",
+    round(l.sofar / l.totalwork * 100,2) "%_COMPLETE",
+    l.message,
+    s.sql_text
+FROM
+    gv$session_longops l
+    LEFT OUTER JOIN v$sql s ON s.hash_value = l.sql_hash_value
+                               AND s.address = l.sql_address
+                               AND s.child_number = 0
+WHERE
+    l.opname NOT LIKE 'RMAN%'
+    AND   l.opname NOT LIKE '%aggregate%'
+    AND   l.totalwork != 0
+    AND   l.sofar <> l.totalwork
+    AND   l.time_remaining > 0
+/
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+--disable archiving
+SQL> shutdown immediate
+
+SQL> startup mount
+
+SQL> alter database noarchivelog;
+
+SQL> alter database open;
+
+SQL> archive log list
+
+--enable archiving
+
+SQL> archive log list 
+
+SQL> shutdown immediate 
+
+SQL> startup mount 
+
+SQL> alter database archivelog; 
+
+SQL> alter database open; 
+
+SQL> archive log list 
+
+
++++++++++++++++++++++++++++++++++++++SQL Plan management++++++++++++++++++++++++++++++
+
+
+select SQL_ID,  HASH_VALUE, PLAN_HASH_VALUE,OPTIMIZER_ENV_HASH_VALUE, CHILD_NUMBER, ROWS_PROCESSED, Optimizer_Cost, MODULE, 
+FIRST_LOAD_TIME, LAST_LOAD_TIME, LAST_ACTIVE_TIME,SQL_TEXT 
+from v$sql WHERE  sql_text LIKE '%SELECT NSB.ID, NSB.BATCH_NUMBER, NPT.NAME, NPT.ID PTP_ID%'
+AND    sql_text NOT LIKE '%dba_sql_plan_baselines%'
+AND    sql_text NOT LIKE '%EXPLAIN%';
+
+select * from dba_hist_sqltext WHERE  sql_text LIKE '%SELECT NSB.ID, NSB.BATCH_NUMBER, NPT.NAME, NPT.ID PTP_ID%'
+
+SELECT   SQL_ID, CHILD_NUMBER AS "Child Num",
+         PLAN_HASH_VALUE AS "Plan Hash",
+         OPTIMIZER_ENV_HASH_VALUE AS "Opt Env Hash"
+FROM     V$SQL
+WHERE    sql_id ='1nvwzzjww5sr4'
+
+select PLAN_NAME, ORIGIN, PARSING_SCHEMA_NAME, CREATED, LAST_MODIFIED, LAST_EXECUTED, ENABLED, ACCEPTED, REPRODUCED, ELAPSED_TIME, ROWS_PROCESSED, OPTIMIZER_COST, MODULE, EXECUTIONS, SQL_TEXT from dba_sql_plan_baselines 
+
+
+++++++++++++++++++++++++++++++++++++++How do I display a stored outline?+++++++++++++++++++
+explain plan into plan_table for
+select * from dba_constraints where owner = 'EMC_BPMS' 
+
+
+select * from table(dbms_xplan.display('PLAN_TABLE',NULL, 'OUTLINE'));
+
+-----Archive log Generation
+
+
+set markup csv on
+select to_char(first_time,'MM-DD') day, to_char(sum(decode(to_char(first_time,'hh24'),'00',1,0)),'99') "00", 
+to_char(sum(decode(to_char(first_time,'hh24'),'01',1,0)),'99') "01", 
+to_char(sum(decode(to_char(first_time,'hh24'),'02',1,0)),'99') "02", 
+to_char(sum(decode(to_char(first_time,'hh24'),'03',1,0)),'99') "03", 
+to_char(sum(decode(to_char(first_time,'hh24'),'04',1,0)),'99') "04", 
+to_char(sum(decode(to_char(first_time,'hh24'),'05',1,0)),'99') "05", 
+to_char(sum(decode(to_char(first_time,'hh24'),'06',1,0)),'99') "06", 
+to_char(sum(decode(to_char(first_time,'hh24'),'07',1,0)),'99') "07", 
+to_char(sum(decode(to_char(first_time,'hh24'),'08',1,0)),'99') "08", 
+to_char(sum(decode(to_char(first_time,'hh24'),'09',1,0)),'99') "09", 
+to_char(sum(decode(to_char(first_time,'hh24'),'10',1,0)),'99') "10", 
+to_char(sum(decode(to_char(first_time,'hh24'),'11',1,0)),'99') "11", 
+to_char(sum(decode(to_char(first_time,'hh24'),'12',1,0)),'99') "12", 
+to_char(sum(decode(to_char(first_time,'hh24'),'13',1,0)),'99') "13", 
+to_char(sum(decode(to_char(first_time,'hh24'),'14',1,0)),'99') "14", 
+to_char(sum(decode(to_char(first_time,'hh24'),'15',1,0)),'99') "15", 
+to_char(sum(decode(to_char(first_time,'hh24'),'16',1,0)),'99') "16", 
+to_char(sum(decode(to_char(first_time,'hh24'),'17',1,0)),'99') "17", 
+to_char(sum(decode(to_char(first_time,'hh24'),'18',1,0)),'99') "18", 
+to_char(sum(decode(to_char(first_time,'hh24'),'19',1,0)),'99') "19", 
+to_char(sum(decode(to_char(first_time,'hh24'),'20',1,0)),'99') "20", 
+to_char(sum(decode(to_char(first_time,'hh24'),'21',1,0)),'99') "21", 
+to_char(sum(decode(to_char(first_time,'hh24'),'22',1,0)),'99') "22", 
+to_char(sum(decode(to_char(first_time,'hh24'),'23',1,0)),'99') "23" 
+from v$log_history group by to_char(first_time,'MM-DD')
+order by 1; 
+
++++++++++++++++++++++++++++++++++++Diagnostics ++++++++++++++++++++++++++++++++++++++
+
+
+
+-- How To Collect 10046 Trace (SQL_TRACE) Diagnostics for Performance Issues (Doc ID 376442.1)
+
+-- --10046 Trace: Tracing a process after it has started
+
+select SQL_ID,  HASH_VALUE, PLAN_HASH_VALUE, CHILD_NUMBER, ROWS_PROCESSED, Optimizer_Cost, MODULE, FIRST_LOAD_TIME, LAST_LOAD_TIME, LAST_ACTIVE_TIME,SQL_TEXT from v$sql WHERE  sql_text LIKE '%SELECT NSB.ID, NSB.BATCH_NUMBER, NPT.NAME, NPT.ID PTP_ID%'
+--1nvwzzjww5sr4
+
+
+select 'ospid: ' || p.spid || ' # ''' ||s.sid||','||s.serial#||''' '||
+  s.osuser || ' ' ||s.machine ||' '||s.username ||' '||s.program line, s.status
+from v$session s , v$process p
+where p.addr = s.paddr
+and s.username = 'SUBFU';
+
+--ospid: 11534836 # '261,29890' PRWDRA14$ PRWDRA14 SUBFU JDBC Thin Client
+--ospid: 17367324 # '819,18605' PRWDRA13$ PRWDRA13 SUBFU JDBC Thin Client
+--
+Once the OS process id for the process has been determined then the trace can be initialised as follows: 
+
+Lets assume that the process to be traced has an os pid of 11534836. 
+Login to SQL*Plus as a dba and execute the following:
+connect / as sysdba
+oradebug setospid 11534836
+oradebug unlimit
+oradebug event 10046 trace name context forever,level 12
+
+oradebug setospid 17367324
+oradebug unlimit
+oradebug event 10046 trace name context forever,level 12
+
+--To disable oradebug tracing once tracing is finished:
+oradebug event 10046 trace name context off
+
+
+--How to Obtain Tracing of Optimizer Computations (EVENT 10053) (Doc ID 225598.1)
+--To use this Package, 
+--first find the SQL_ID:
+
+select sql_id, child_number, sql_text from v$sql 
+where sql_text LIKE '%SELECT NSB.ID, NSB.BATCH_NUMBER, NPT.NAME, NPT.ID PTP_ID%'
+--1nvwzzjww5sr4	2	SELECT NSB.ID, NSB.BATCH_NUMBER, NPT.NAME, NPT.ID PTP_ID, NSB.OFFER_TYPE, SUB_OFFER_SEARCH_PKG.GET_SUBMISSION_TYPE (NSB.BATCH_NUMBER, NSB.SUBMISSION_TYPE) AS SUBMISSION_TYPE, TO_CHAR (NSB.RECEIVED_DATE, 'DD/MM/YYYY HH24:MI:SS') AS RECEIVED_DATE, NSB.TOTAL_OFFERS, NSB.VALID_OFFERS, (NSB.TOTAL_OFFERS - NSB.VALID_OFFERS) AS INVALID_OFFERS, NSB.FILE_DELIVERY_STATUS, NVL (GC_ERRORS.TOT_GC_ERR, 0) AS TOTAL_GC, DECODE (NVL (GC_ERRORS.TOT_GC_ERR, 0), 0, 'N', 'Y') AS GC_FLAG, NSD.FILENAME, TO_CHAR (NSB.CREATED_DATE, 'DD/MM/YYYY HH24:MI:SS') AS PROCESS_START_TIME, TO_CHAR (NSB.VALIDATION_DATE, 'DD/MM/YYYY HH24:MI:SS') AS PROCESS_END_TIME, ROUND ( (NSB.VALIDATION_DATE - NSB.CREATED_DATE) * 100000, 2) AS PROCESS_TIME, SEC.USER_NAME, NSB.GATE_CLOS, NSB.COMPL_VAL, NSB.RECEIVED_INTERFACE FROM NEM_SUBMISSION_BATCHES NSB, NEM_SUBMISSIONS_DOCUMENTS NSD, CRA_USER_DETAILS SEC, NEM_PARTICIPANTS NPT, ( SELECT SVE.SBH_ID, COUNT (*) TOT_GC_ERR FROM NEM_SUBMISSION_ERRORS SVE, NEM_ERROR_CODES SEC WHERE SEC.ID =
+
+--Then you can use the following syntax using the SQL_ID for your SQL (in my case 'cjk13xfm8ybh7' above):
+
+
+SQL> execute DBMS_SQLDIAG.DUMP_TRACE(-
+    p_sql_id=>'1nvwzzjww5sr4', -
+    p_child_number=>2, -
+    p_component=>'Optimizer', -
+    p_file_id=>'TRACE_10053');
+    
+--The trace file will include the text as stated in "p_file_id":
+
+++++++++++++++++++++++++++++++++++++++++DATA GUARD ++++++++++++++++++++++++++++++++++++++++++
+
+DataGuard  Health Check
+
+Check Primary database protection mode and switchover status.: 
+SELECT NAME,OPEN_MODE,DATABASE_ROLE,PROTECTION_MODE,DB_UNIQUE_NAME,SWITCHOVER_STATUS FROM V$DATABASE;
+ 
+Check maximum archive log sequence at primary : 
+SELECT MAX(SEQUENCE#) FROM V$THREAD;
+
+Check database role, protection mode at standby database :
+SELECT NAME,OPEN_MODE,DATABASE_ROLE,PROTECTION_MODE,DB_UNIQUE_NAME FROM V$DATABASE;
+
+Now, At standby database check archived logs are applied or not until the maximum sequence we checked from Primary Database.
+SELECT SEQUENCE#,APPLIED FROM V$ARCHIVED_LOG ORDER BY SEQUENCE#;
+
+Check recovery progress with the v$managed_standby view.
+select process,pid,status,sequence# from v$managed_standby; 
+
+-----------------------------------------------------------------------------------------
+Start Apply Process
+Start the apply process on standby server.
+
+# Foreground redo apply. Session never returns until cancel. 
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE;
+
+# Background redo apply. Control is returned to the session once the apply process is started.
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+
+If you need to cancel the apply process, issue the following command.
+
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+-----------------------------------------------------------------------------------------
+ 
+Check if there is lag:
+
+Primary:
+select thread#, max(sequence#) "Last Primary Seq Generated" from v$archived_log val, v$database vdb where val.resetlogs_change# = vdb.resetlogs_change# group by thread# order by 1;
+Standby:
+select thread#, max(sequence#) "Last Standby Seq Received" from v$archived_log val, v$database vdb where val.resetlogs_change# = vdb.resetlogs_change# group by thread# order by 1;
+select thread#, max(sequence#) "Last Standby Seq Applied" from v$archived_log val, v$database vdb where val.resetlogs_change# = vdb.resetlogs_change# and val.applied in ('YES','IN-MEMORY') group by thread# order by 1;
+
+there is no lag, but DataGuard Broker show error:
+
+DGMGRL> show configuration
+
+The apply lag in v$dataguard_stats shows no value ( has a NULL value)
+
+SQL> select * from v$dataguard_stats;
+
+-----------------------------------------------DGMGRL------------------------------------------
+
+
+DGMGRL>  edit database 'DRRERUN' set state='APPLY-ON';
+Succeeded.
+DGMGRL> show database 'DRRERUN';
+
+Database - DRRERUN
+
+  Role:               PHYSICAL STANDBY
+  Intended State:     APPLY-ON
+  Transport Lag:      0 seconds (computed 0 seconds ago)
+  Apply Lag:          0 seconds (computed 0 seconds ago)
+  Average Apply Rate: 17.96 MByte/s
+  Real Time Query:    OFF
+  Instance(s):
+    EMCRERUN
+
+Database Status:
+SUCCESS
+
+DGMGRL> show configuration
+
+Configuration - RERUNDG
+
+  Protection Mode: MaxPerformance
+  Members:
+  AYRERUN - Primary database
+    DRRERUN - Physical standby database
+
+Fast-Start Failover: DISABLED
+
+Configuration Status:
+SUCCESS   (status updated 10 seconds ago)
+
+
+
+To find the overall progress of the recovery process on the standby database, v$archive_dest_status on the standby site can be queried to find the last archived log received and applied on this site. The following query, when executed on standby database, will provide this information:
+
+Select 
+   ARCHIVED_THREAD#, 
+   ARCHIVED_SEQ#, 
+   APPLIED_THREAD#,
+   APPLIED_SEQ#
+From 
+   V$ARCHIVE_DEST_STATUS;
+   
+The last archived log on the primary site can be obtained from the SEQUENCE# column of v$log_history.
+Select 
+   max(SEQUENCE#) Latest_Archive_Log
+From 
+   V$LOG_HISTORY;
+   
+   
+   
+==================Windows========================
+
+1. Search string
+C:\temp\putty_logs>findstr /C:"ln -s" *.log   
+
+
+==================Unix========================
+
+===================SHARP=====================
+
+Trace Gather Stats operations (Global level)
+-----------------------------------------------
+
+select distinct(operation), count(*) from Dba_Optstat_Operations where TRUNC(start_time) = '16-apr-2019' group by operation;
+
+select * from Dba_Optstat_Operations where TRUNC(start_time)= '16-apr-2019' order by start_time desc
+
+exec DBMS_STATS.SET_GLOBAL_PREFS('trace', 4+8+16+64+512+1024+2048 /* 3676 */); -- set trace just before Auto stats job 
+
+select dbms_stats.get_param('trace') from dual; -- check trace has been set or not , it should give result as 3676 
+--3676
+--How to find the trace file...
+--Get the Session ID from Dba_Optstat_Operations and Find the process ID from v$session
+select sid, serial#, username, process, machine, program, sql_id, module, action,logon_time from v$session where SID=493
+--Find the trace file location
+select * from v$diag_info where name='Diag Trace'
+
+--Search for the trace file name with the process ID
+
+bash-4.4$ pwd
+/usr/appl/logs/oracle/diag/rdbms/emcdev/EMCDEV/trace
+bash-4.4$  ls -lrt *32506146*
+-rw-r-----    1 oracle   oinstall     166578 Apr 16 11:53 EMCDEV_j001_32506146.trm
+-rw-r-----    1 oracle   oinstall  182058314 Apr 16 11:53 EMCDEV_j001_32506146.trc
+bash-4.4$
+
+SQL> exec DBMS_STATS.SET_GLOBAL_PREFS('trace',0); --- Disable trace just after auto stats job completion 
+SQL> select dbms_stats.get_param('trace') from dual; --- it must return 0 to confirm trace is disabled 
+
+
+
+SELECT * FROM dba_optstat_operations where start_time > sysdate -2 ORDER BY start_time DESC;
+
+select * from mon_messages where message_date > sysdate -1 order by message_date desc
+
+SELECT owner, table_name, stats_update_time
+     FROM dba_tab_stats_history
+     WHERE owner='CRAFO'
+     --AND table_name='DM_SYSOBJECT_R'
+     ORDER BY owner, table_name, stats_update_time DESC;
+	 
+
+1. 
+# To check status of PowerHA resource groups.
+
+> sudo /usr/es/sbin/cluster/utilities/clRGinfo
+
+# To stop SharePlex resource group (including both port 7100 & 5200).
+
+sudo /usr/es/sbin/cluster/utilities/clRGmove -s 'false' -d -i -g ' HA_EMCP_RG' -n 'PRUXDB13'
+
+--To Start
+sudo /usr/es/sbin/cluster/utilities/clRGmove -s 'false' -u -i -g ' HA_EMCP_RG' -n 'PRUXDB13'
+	 
+	 
+sudo /usr/es/sbin/cluster/utilities/clRGmove -s 'false' -u -i -g ' HA_REP13_RG' -n 'PRUXDB13'
+
+--
+sudo /usr/es/sbin/cluster/utilities/clRGmove -s 'false' -u -i -g 'HA_EMCPDG2_RG' -n 'PRUXDB14'
+
+
+
+--+++++++++++++++++++++++++++++++++ORACLE SUPPORT ++++++++++++++++++++++++++++++
+
+--Gather_database_stats(auto)
+
+spool /tmp/check1.html 
+set markup html on 
+set echo on 
+select * from DBA_AUTOTASK_WINDOW_CLIENTS; 
+select * from DBA_AUTOTASK_TASK; 
+select * from DBA_AUTOTASK_WINDOW_HISTORY order by WINDOW_START_TIME; 
+select * from DBA_AUTOTASK_SCHEDULE; 
+select * from DBA_AUTOTASK_OPERATION; 
+select * from DBA_AUTOTASK_JOB_HISTORY order by JOB_START_TIME; 
+select * from DBA_AUTOTASK_CLIENT_JOB; 
+SELECT * from DBA_AUTOTASK_CLIENT_HISTORY; 
+select * from DBA_AUTOTASK_CLIENT; 
+select * from dba_scheduler_windows; 
+select * from dba_scheduler_window_groups; 
+select * from dba_scheduler_job_run_details where job_name like 'ORA$AT%' and ACTUAL_START_DATE >sysdate -7 order by ACTUAL_START_DATE; 
+select * from DBA_SCHEDULER_JOB_LOG where job_name like 'ORA$AT%' and log_date > sysdate-7 order by log_date; 
+SELECT program_name, program_action, enabled FROM dba_scheduler_programs; 
+select * from V$RSRC_PLAN_HISTORY; 
+show parameter resource 
+set markup html off 
+spool off 
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+--Reporting Statistics Gathering Of Objects During Automatic Job In 12c (Doc ID 2104236.1)
+--new feature available in 12C which can track the objects that are gathered with the statistics during the automatic statistics collection job running through the maintenance window.
+
+--REPORT_STATS_OPERATIONS: This function generates a report of all statistics operations that take place between two timestamps which may or may not have been provided.
+
+
+--Following command can be used to get the report:-
+
+SET LINES 200 PAGES 0
+SET LONG 100000
+COLUMN REPORT FORMAT A200
+
+VARIABLE my_report CLOB;
+BEGIN
+:my_report := DBMS_STATS.REPORT_STATS_OPERATIONS (
+since => SYSDATE-1
+, until => SYSDATE
+, detail_level => 'TYPICAL'
+, format => 'HTML'
+, auto_only => TRUE
+);
+END;
+/
+
+PL/SQL procedure successfully completed.
+
+SQL> spool DEV1_stats_operations_16-April.html
+SQL> print my_report;
+SQL> spool off;
+
+
+--For object detail, use OPID:
+
+SET LINES 200 PAGES 0 
+COLUMN REPORT FORMAT A200 
+set long 999999999 
+set longchunksize 999999999 
+VARIABLE my_report CLOB; 
+BEGIN 
+:my_report :=DBMS_STATS.REPORT_SINGLE_STATS_OPERATION ( 
+   OPID    => 3274350, 
+FORMAT  => 'HTML' 
+); 
+END; 
+/ 
+
+
+SQL> spool single_stats_operations_3274350.html
+SQL> print my_report;
+SQL> spool off;
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+--SQL: How to Find Sessions Generating Lots of Redo or Archive logs (Doc ID 167492.1)
+
+fix:
+
+To find sessions generating lots of redo, you can use either of the following 
+methods. Both methods examine the amount of undo generated. When a transaction 
+generates undo, it will automatically generate redo as well.
+
+The methods are:
+1) Query V$SESS_IO. This view contains the column BLOCK_CHANGES which indicates
+   how much blocks have been changed by the session. High values indicate a 
+   session generating lots of redo.
+
+   The query you can use is:
+       SQL> SELECT s.sid, s.serial#, s.username, s.program,
+         2  i.block_changes
+         3  FROM v$session s, v$sess_io i
+         4  WHERE s.sid = i.sid
+         5  ORDER BY 5 desc, 1, 2, 3, 4;
+
+   Run the query multiple times and examine the delta between each occurrence
+   of BLOCK_CHANGES. Large deltas indicate high redo generation by the session.
+
+2) Query V$TRANSACTION. This view contains information about the amount of
+   undo blocks and undo records accessed by the transaction (as found in the 
+   USED_UBLK and USED_UREC columns).
+ 
+  The query you can use is:
+      SQL> SELECT s.sid, s.serial#, s.username, s.program, 
+        2  t.used_ublk, t.used_urec
+        3  FROM v$session s, v$transaction t
+        4  WHERE s.taddr = t.addr
+        5  ORDER BY 5 desc, 6 desc, 1, 2, 3, 4;
+
+   Run the query multiple times and examine the delta between each occurrence
+   of USED_UBLK and USED_UREC. Large deltas indicate high redo generation by 
+   the session.
+
+You use the first query when you need to check for programs generating lots of 
+redo when these programs activate more than one transaction. The latter query 
+can be used to find out which particular transactions are generating redo.
+
+SQL> SELECT
+   s.blocking_session,
+   s.sid,
+   s.serial#,
+   s.seconds_in_wait
+FROM
+   v$session s
+WHERE
+   blocking_session IS NOT NULL  2    3    4    5    6    7    8    9  ;
+
+"BLOCKING_SESSION","SID","SERIAL#","SECONDS_IN_WAIT"
+162,6,57731,432
+699,22,47762,654
+699,43,22006,600
+553,49,43366,582
+699,51,56313,738
+699,55,24835,992
+403,76,33605,159
+699,77,10132,71
+699,80,41425,644
+553,84,46301,102
+22,119,23158,751
+699,161,45211,159
+699,162,38501,732
+553,165,20260,42
+699,188,57396,246
+699,189,50960,523
+162,201,11756,583
+699,237,59529,337
+22,238,38735,23
+286,241,30101,807
+553,263,38776,402
+553,267,13493,702
+699,280,7634,102
+699,286,15764,822
+699,291,6498,659
+553,293,35681,222
+699,303,17051,244
+553,357,5585,342
+553,360,18411,282
+699,384,33812,881
+161,388,49950,0
+286,389,14893,822
+699,396,8032,564
+699,403,18193,1051
+22,412,43826,23
+699,427,21764,244
+699,493,597,603
+775,498,62814,522
+699,499,48563,159
+286,502,39399,805
+553,506,7353,642
+520,518,62576,222
+609,520,23832,282
+699,532,52325,24
+699,535,13244,247
+699,553,6541,1001
+286,596,5825,822
+699,609,20812,582
+699,627,14838,607
+699,645,45970,600
+699,658,32570,867
+699,661,50397,492
+200,699,45499,120
+699,716,15825,963
+752,746,17156,582
+699,752,41088,1001
+699,760,37568,644
+520,768,2102,282
+699,775,29480,762
+553,785,59735,462
+699,786,30753,729
+699,820,44688,1018
+699,829,37445,642
+699,832,52590,244
+553,841,18234,282
+699,845,44130,603
+699,857,35958,23
+699,860,15747,244
+699,862,32753,868
+699,867,40719,711
+699,874,43520,244
+553,876,30851,762
+553,888,50631,462
+
+73 rows selected.
+
+SQL> SELECT s1.username || '@' || s1.machine
+    || ' ( SID=' || s1.sid || ' )  is blocking '
+    || s2.username || '@' || s2.machine || ' ( SID=' || s2.sid || ' ) ' AS blocking_status
+    FROM v$lock l1, v$session s1, v$lock l2, v$session s2
+    WHERE s1.sid=l1.sid AND s2.sid=l2.sid
+    AND l1.BLOCK=1 AND l2.request > 0
+    AND l1.id1 = l2.id1
+    AND l1.id2 = l2.id2;  2    3    4    5    6    7    8
+
+"BLOCKING_STATUS"
+"SYS@pruxdb13 ( SID=520 )  is blocking SYS@pruxdb13 ( SID=42 ) "
+"SYS@pruxdb13 ( SID=520 )  is blocking SYS@pruxdb13 ( SID=518 ) "
+"SYS@pruxdb13 ( SID=520 )  is blockAing SYS@pruxdb13 ( SID=768 ) "
+"SYS@pruxdb13 ( SID=520 )  is blocking SYS@pruxdb13 ( SID=872 ) "
+
+SQL>
+
+
+---------Database Security----------
+
+SQL> alter session set nls_date_format='dd/mm/yyyy hh24:mi:ss';
+
+SQL> SELECT NAME, PTIME "LAST CHANGED" FROM SYS.USER$ a, DBA_USERS B WHERE A.NAME=B.USERNAME AND B.username='EMCP_MDS';
+
+--cHECK LOCKED ACCOUNTS
+select * from dba_users where account_statuS LIKE '%LOCKED%' ORDER BY LOCK_DATE DESC
+
+
+
+---Operationg System (OS) -------------
+
+AIX:
+Default entry in syslog.conf is "caa.info /var/adm/ras/syslog.caa rotate size 1m
+
+
+-----------Database Upgrade ----------------------------
+
+Oracle 12c: 
+. /usr/appl/software/oracle/product/12.2.0/bin/dbupgrade >dbupgrade_emcp.log 2>&1
+--Internally Calls [/usr/appl/software/oracle/product/12.2.0/rdbms/admin/catctl.pl]
+
+
+-------------SHAREPLEX--------------------------------------
+
+
+
+
+
+
+-----------HACMP-------------------------------------------------
+
+
+Stop Database services
+
+use following IBM PowerHA commands to stop the listeners and Databases
+
+$sudo /usr/es/sbin/cluster/utilities/clRGinfo
+$sudo /usr/es/sbin/cluster/utilities/clRGmove -s 'false' -d -i -g 'HA_DR_EMCP_RG' -n 'druxdb13'
+$sudo /usr/es/sbin/cluster/utilities/clRGmove -s 'false' -d -i -g 'HA_DR_PRSOA_RG' -n 'druxdb13'
+$sudo /usr/es/sbin/cluster/utilities/clRGmove -s 'false' -d -i -g 'HA_DR_REP13_RG' -n 'druxdb13'
+
